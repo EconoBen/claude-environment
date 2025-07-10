@@ -1,0 +1,98 @@
+# Example Claude Environment Configuration
+
+# Project Management Settings
+project_settings:
+  default_project_type: personal  # Options: personal, work
+  default_priority: medium        # Options: low, medium, high
+  auto_create_project: true       # Auto-create project after 5 operations
+  project_dir: ~/.claude/projects # Project storage location
+
+# GitHub Integration
+github:
+  enabled: true
+  auto_create_issue: false        # Create issue when project is created
+  default_repo: ""                # Leave empty to detect from current directory
+  default_labels:
+    - claude-project
+    - in-progress
+  sync_on_checkpoint: true        # Auto-sync to issue on checkpoint
+  close_on_archive: true          # Close issue when project archived
+
+# Linear Integration (requires Linear MCP)
+linear:
+  enabled: false
+  workspace_id: ""
+  team_id: ""
+  default_labels: []
+  sync_on_checkpoint: false
+
+# Git Settings
+git:
+  auto_commit: true               # Auto-commit on checkpoint
+  remote_backup: true             # Push to remote if available
+  install_hooks_on_create: true   # Install git hooks for new projects
+  commit_prefix: ""               # Prefix for auto-commits
+
+# Hook Settings
+hooks:
+  context_analysis:
+    enabled: true
+    threshold: 5                  # Analyze every N actions
+    use_api: false               # Use Claude API (requires key)
+    model: claude-3-haiku-20240307
+  
+  secrets_detection:
+    enabled: true
+    block_on_high_severity: false # Prevent operation on high severity
+    
+  code_formatting:
+    enabled: false                # Disabled by default
+    auto_format: false            # Just warn, don't auto-format
+    
+  test_runner:
+    enabled: false
+    auto_run: false               # Just suggest, don't auto-run
+
+# UI Preferences
+ui:
+  use_fzf: true                   # Use fzf for interactive selection
+  show_stats_on_list: true        # Show time/session stats
+  color_output: true              # Colored terminal output
+  date_format: "%Y-%m-%d"         # Date format for displays
+  time_format: "%H:%M"            # Time format for displays
+
+# API Keys (optional)
+api_keys:
+  anthropic: ""                   # For context analysis
+  # Store in environment variable ANTHROPIC_API_KEY instead
+
+# Advanced Settings
+advanced:
+  state_file: ~/.claude/.context_analyzer_state.json
+  transcript_retention_days: 7    # Keep transcripts for N days
+  backup_retention_days: 30       # Keep project backups for N days
+  debug_mode: false               # Enable debug logging
+  log_dir: ~/.claude/logs         # Log file location
+
+# Workspace-specific overrides
+workspaces:
+  monohelix:
+    default_project_type: work
+    github:
+      default_repo: monohelix/projects
+      default_labels:
+        - work
+        - monohelix
+        
+# Environment-specific settings
+environments:
+  development:
+    hooks:
+      test_runner:
+        enabled: true
+        auto_run: true
+  
+  production:
+    hooks:
+      secrets_detection:
+        block_on_high_severity: true

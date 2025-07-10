@@ -1,0 +1,67 @@
+{
+  "PostToolUse": [
+    {
+      "name": "Context Analyzer",
+      "command": "~/.claude/hooks/claude-project-context-analyzer.py",
+      "triggers": ["Edit", "Write", "MultiEdit", "Bash", "Task"],
+      "enabled": true,
+      "config": {
+        "analysis_threshold": 5,
+        "use_api": false
+      }
+    },
+    {
+      "name": "Secrets Detector",
+      "command": "~/.claude/hooks/claude-secrets-detector.py",
+      "triggers": ["Write", "Edit", "MultiEdit"],
+      "enabled": true,
+      "config": {
+        "severity_threshold": "medium"
+      }
+    },
+    {
+      "name": "Code Formatter Check",
+      "command": "~/.claude/hooks/claude-code-formatter.py",
+      "triggers": ["Edit", "Write"],
+      "file_patterns": ["*.py", "*.js", "*.ts", "*.go"],
+      "enabled": false
+    },
+    {
+      "name": "Test Suggester",
+      "command": "~/.claude/hooks/claude-test-runner.py",
+      "triggers": ["Edit", "Write"],
+      "file_patterns": ["*.py", "*.js", "*.ts"],
+      "enabled": false
+    },
+    {
+      "name": "UV Enforcer",
+      "command": "~/.claude/hooks/claude-uv-enforcer.py",
+      "triggers": ["Bash"],
+      "enabled": false
+    }
+  ],
+  "PreToolUse": [
+    {
+      "name": "Git Location Enforcer",
+      "command": "~/.claude/hooks/pre-git-init.sh",
+      "triggers": ["Bash"],
+      "patterns": ["git init"],
+      "enabled": true
+    }
+  ],
+  "Stop": [
+    {
+      "name": "Project Checkpoint",
+      "command": "claude-project checkpoint",
+      "enabled": true
+    }
+  ],
+  "SubagentStop": [
+    {
+      "name": "Context Summary",
+      "command": "~/.claude/hooks/claude-project-context-analyzer.py",
+      "args": ["--summary"],
+      "enabled": false
+    }
+  ]
+}
