@@ -1,0 +1,771 @@
+#!/bin/bash
+
+# Claude Project Management CLI
+# Manages projects in ~/.claude/projects/
+
+PROJECTS_DIR="$HOME/.claude/projects"
+ACTIVE_DIR="$PROJECTS_DIR/active"
+ARCHIVED_DIR="$PROJECTS_DIR/archived"
+IDEAS_DIR="$PROJECTS_DIR/ideas"
+TRASH_DIR="$PROJECTS_DIR/.trash"
+TEMPLATE="$PROJECTS_DIR/templates/default.md"
+IDEA_TEMPLATE="$PROJECTS_DIR/templates/idea.md"
+CONFIG_FILE="$HOME/.claude/config.yaml"
+
+# Load configuration if exists
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Extract config values using grep/sed
+        DEFAULT_TYPE=$(grep "type:" "$CONFIG_FILE" | grep -v "^#" | tail -1 | cut -d':' -f2 | tr -d ' ')
+        AUTO_CREATE_ISSUE=$(grep "auto_create_issue:" "$CONFIG_FILE" | cut -d':' -f2 | tr -d ' ')
+        DEFAULT_LABELS=$(grep "default_labels:" "$CONFIG_FILE" | sed 's/.*\[\(.*\)\].*/\1/' | tr -d '"')
+    else
+        # Defaults if no config
+        DEFAULT_TYPE="personal"
+        AUTO_CREATE_ISSUE="true"
+        DEFAULT_LABELS="claude-project"
+    fi
+}
+
+# Load config on startup
+load_config
+
+# Ensure directories exist
+mkdir -p "$ACTIVE_DIR" "$ARCHIVED_DIR" "$IDEAS_DIR" "$TRASH_DIR"
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Generate project ID
+generate_id() {
+    echo "proj-$(date +%s)"
+}
+
+# Create GitHub issue for project
+create_github_issue() {
+    local filepath="$1"
+    local name="$2"
+    
+    # Extract description from project file
+    local description=$(awk '/^## Description/{getline; print}' "$filepath")
+    
+    # Create issue and capture the number
+    local labels="${DEFAULT_LABELS:-claude-project}"
+    local issue_output=$(gh issue create \
+        --title "Project: $name" \
+        --body "$description" \
+        --label "$labels" 2>&1)
+    
+    if [ $? -eq 0 ]; then
+        # Extract issue number from output
+        local issue_number=$(echo "$issue_output" | grep -o '#[0-9]\+' | head -1 | tr -d '#')
+        if [ -n "$issue_number" ]; then
+            # Update project file with issue number
+            sed -i '' "s/github_issue: null/github_issue: $issue_number/g" "$filepath"
+            echo -e "${GREEN}✅ Created GitHub issue #$issue_number${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️  Could not create GitHub issue: $issue_output${NC}"
+    fi
+}
+
+# Link project to external systems
+link_project() {
+    local project_id="$1"
+    local system="$2"
+    local external_id="$3"
+    
+    # Find project file
+    local file=$(find "$ACTIVE_DIR" -name "*${project_id}*.md" | head -1)
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    case "$system" in
+        github)
+            if [ -z "$external_id" ]; then
+                # Create new issue
+                local name=$(grep "^name:" "$file" | sed 's/name: "\(.*\)"/\1/')
+                create_github_issue "$file" "$name"
+            else
+                # Link existing issue
+                sed -i '' "s/github_issue: .*/github_issue: $external_id/g" "$file"
+                echo -e "${GREEN}✅ Linked to GitHub issue #$external_id${NC}"
+            fi
+            ;;
+        linear)
+            if [ -z "$external_id" ]; then
+                echo -e "${YELLOW}Linear ticket creation should be done through Claude with Linear MCP${NC}"
+                echo "Once created, link it with: claude-project link linear $project_id <ticket-id>"
+            else
+                sed -i '' "s/linear_ticket: .*/linear_ticket: \"$external_id\"/g" "$file"
+                echo -e "${GREEN}✅ Linked to Linear ticket $external_id${NC}"
+            fi
+            ;;
+        *)
+            echo -e "${RED}Unknown system: $system${NC}"
+            echo "Supported systems: github, linear"
+            return 1
+            ;;
+    esac
+    
+    # Commit change
+    cd "$PROJECTS_DIR" && git add . && git commit -m "Linked project to $system: $external_id" >/dev/null 2>&1
+}
+
+# Sync project status with external systems
+sync_project() {
+    local project_id="$1"
+    
+    # Find project file
+    local file=$(find "$ACTIVE_DIR" -name "*${project_id}*.md" | head -1)
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    # Extract metadata
+    local status=$(grep "^status:" "$file" | cut -d' ' -f2)
+    local github_issue=$(grep "github_issue:" "$file" | cut -d' ' -f2)
+    local linear_ticket=$(grep "linear_ticket:" "$file" | cut -d' ' -f2 | tr -d '"')
+    
+    # Sync with GitHub
+    if [ "$github_issue" != "null" ] && [ -n "$github_issue" ]; then
+        echo -e "${BLUE}Syncing with GitHub issue #$github_issue...${NC}"
+        
+        # Determine repository context
+        local project_type=$(grep "^type:" "$file" | cut -d' ' -f2)
+        local original_dir=$(pwd)
+        
+        # Change to appropriate repository
+        if [ "$project_type" = "work" ]; then
+            cd "$HOME/Documents/GitHub/monohelix" 2>/dev/null || {
+                echo -e "${YELLOW}⚠️  Could not access monohelix repository${NC}"
+                return 1
+            }
+        fi
+        
+        # Get recent progress from project file
+        local progress=$(awk '/## Progress Log/,/## Next Steps/' "$file" | \
+            tail -n +3 | head -n -1 | tail -5)
+        
+        if [ -n "$progress" ]; then
+            gh issue comment "$github_issue" --body "### Progress Update
+
+$progress"
+            echo -e "${GREEN}✅ Updated GitHub issue #$github_issue${NC}"
+        fi
+        
+        # Return to original directory
+        cd "$original_dir"
+        
+        # Close issue if project is archived
+        if [ "$status" = "archived" ]; then
+            gh issue close "$github_issue"
+            echo -e "${GREEN}✅ Closed GitHub issue${NC}"
+        fi
+    fi
+    
+    # Sync with Linear
+    if [ "$linear_ticket" != "null" ] && [ -n "$linear_ticket" ]; then
+        echo -e "${YELLOW}Linear sync should be done through Claude with Linear MCP${NC}"
+    fi
+}
+
+# Install git hooks for current repository
+install_hooks() {
+    if [ ! -d ".git" ]; then
+        echo -e "${RED}Not in a git repository${NC}"
+        return 1
+    fi
+    
+    local hooks_dir=".git/hooks"
+    
+    # Create prepare-commit-msg hook
+    cat > "$hooks_dir/prepare-commit-msg" << 'EOF'
+#!/bin/bash
+# Claude project integration - prepare commit message
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+
+# Only modify if not a merge/rebase
+if [ -z "$COMMIT_SOURCE" ]; then
+    # Find Claude project for this repo
+    git_root=$(git rev-parse --show-toplevel)
+    project_file=$(grep -l "git_repo: \"$git_root\"" ~/.claude/projects/active/*.md 2>/dev/null | head -1)
+    
+    if [ -f "$project_file" ]; then
+        # Extract issue references
+        github_issue=$(grep "github_issue:" "$project_file" | cut -d' ' -f2)
+        linear_ticket=$(grep "linear_ticket:" "$project_file" | cut -d' ' -f2 | tr -d '"')
+        
+        # Prepare reference
+        ref=""
+        if [ "$github_issue" != "null" ] && [ -n "$github_issue" ]; then
+            ref="#$github_issue"
+        elif [ "$linear_ticket" != "null" ] && [ -n "$linear_ticket" ]; then
+            ref="$linear_ticket"
+        fi
+        
+        # Add reference to commit message
+        if [ -n "$ref" ]; then
+            echo -e "\n\nRef: $ref" >> "$COMMIT_MSG_FILE"
+        fi
+    fi
+fi
+EOF
+    
+    chmod +x "$hooks_dir/prepare-commit-msg"
+    echo -e "${GREEN}✅ Installed git hooks${NC}"
+}
+
+# Create new project
+new_project() {
+    local type=""
+    local name=""
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --work|-w)
+                type="work"
+                shift
+                ;;
+            --personal|-p)
+                type="personal"
+                shift
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error: Project name required${NC}"
+        echo "Usage: claude-project new [--work|-w|--personal|-p] <project-name>"
+        return 1
+    fi
+    
+    # If type not specified, use default or ask
+    if [ -z "$type" ]; then
+        if [ -n "$DEFAULT_TYPE" ]; then
+            type="$DEFAULT_TYPE"
+        else
+            echo -e "${YELLOW}Project type?${NC}"
+            echo "1) Personal (default)"
+            echo "2) Work"
+            read -p "Select [1-2]: " choice
+            case "$choice" in
+                2) type="work" ;;
+                *) type="personal" ;;
+            esac
+        fi
+    fi
+    
+    local id=$(generate_id)
+    local filename="${id}-${name// /-}.md"
+    local filepath="$ACTIVE_DIR/$filename"
+    
+    # Use appropriate template
+    local template="$TEMPLATE"
+    if [ "$type" = "work" ]; then
+        template="$PROJECTS_DIR/templates/work.md"
+    fi
+    
+    # Copy template and update metadata
+    cp "$template" "$filepath"
+    
+    # Update the template with actual values
+    sed -i '' "s/proj-XXXX/$id/g" "$filepath"
+    sed -i '' "s/Project Name/$name/g" "$filepath"
+    sed -i '' "s/YYYY-MM-DD/$(date +%Y-%m-%d)/g" "$filepath"
+    sed -i '' "s/YYYY-MM-DDTHH:MM:SS/$(date +%Y-%m-%dT%H:%M:%S)/g" "$filepath"
+    
+    # Check for git repository
+    if [ -d ".git" ]; then
+        local git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+        if [ -n "$git_root" ]; then
+            sed -i '' "s|git_repo: null|git_repo: \"$git_root\"|g" "$filepath"
+            echo -e "${BLUE}ℹ️  Detected git repository at: $git_root${NC}"
+            
+            # Offer to create GitHub issue (or auto-create based on config)
+            if [ "$AUTO_CREATE_ISSUE" = "true" ]; then
+                echo -e "${BLUE}Creating GitHub issue...${NC}"
+                create_github_issue "$filepath" "$name"
+            else
+                read -p "Create GitHub issue for this project? [Y/n] " create_issue
+                if [[ "$create_issue" != "n" && "$create_issue" != "N" ]]; then
+                    create_github_issue "$filepath" "$name"
+                fi
+            fi
+        fi
+    fi
+    
+    # Update index
+    update_index "$id" "$name" "active" "$filename"
+    
+    # Git commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "New $type project: $name ($id)" >/dev/null 2>&1
+    
+    echo -e "${GREEN}✅ Created $type project: $id - $name${NC}"
+    echo -e "📁 File: $filepath"
+    
+    # For work projects, offer Linear integration
+    if [ "$type" = "work" ]; then
+        echo -e "${YELLOW}📋 To link with Linear, use: claude-project link linear $id${NC}"
+    fi
+}
+
+# List all projects
+list_projects() {
+    echo -e "${BLUE}📋 Active Projects:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    local count=0
+    for file in "$ACTIVE_DIR"/*.md; do
+        [ -f "$file" ] || continue
+        
+        local id=$(grep "^id:" "$file" | cut -d' ' -f2)
+        local name=$(grep "^name:" "$file" | sed 's/name: "\(.*\)"/\1/')
+        local updated=$(grep "^updated:" "$file" | cut -d' ' -f2)
+        local priority=$(grep "^priority:" "$file" | cut -d' ' -f2)
+        
+        # Color code by priority
+        case $priority in
+            high) priority_color="${RED}HIGH${NC}" ;;
+            medium) priority_color="${YELLOW}MED${NC}" ;;
+            low) priority_color="${GREEN}LOW${NC}" ;;
+            *) priority_color="$priority" ;;
+        esac
+        
+        echo -e "$id | $name | $priority_color | $updated"
+        ((count++))
+    done
+    
+    if [ $count -eq 0 ]; then
+        echo "No active projects found."
+    fi
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "Total: $count active projects"
+}
+
+# Show project status
+status_project() {
+    local search="$1"
+    if [ -z "$search" ]; then
+        # Show most recent project
+        local file=$(ls -t "$ACTIVE_DIR"/*.md 2>/dev/null | head -1)
+    else
+        # Find project by ID
+        local file=$(find "$ACTIVE_DIR" -name "*${search}*.md" | head -1)
+    fi
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    echo -e "${BLUE}📊 Project Status${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Extract metadata
+    local id=$(grep "^id:" "$file" | cut -d' ' -f2)
+    local name=$(grep "^name:" "$file" | sed 's/name: "\(.*\)"/\1/')
+    local status=$(grep "^status:" "$file" | cut -d' ' -f2)
+    local priority=$(grep "^priority:" "$file" | cut -d' ' -f2)
+    local sessions=$(grep "session_count:" "$file" | cut -d' ' -f2)
+    local time=$(grep "total_time:" "$file" | sed 's/.*total_time: "\(.*\)"/\1/')
+    
+    echo -e "ID:        $id"
+    echo -e "Name:      ${GREEN}$name${NC}"
+    echo -e "Status:    $status"
+    echo -e "Priority:  $priority"
+    echo -e "Sessions:  $sessions"
+    echo -e "Time:      $time"
+    echo ""
+    
+    # Show goals
+    echo -e "${YELLOW}Goals:${NC}"
+    sed -n '/^## Goals/,/^##/p' "$file" | grep -E "^- \[.\]" | head -10
+    echo ""
+    
+    # Show next steps
+    echo -e "${YELLOW}Next Steps:${NC}"
+    sed -n '/^## Next Steps/,/^##/p' "$file" | grep -E "^[0-9]" | head -5
+}
+
+# Continue working on a project
+continue_project() {
+    local search="$1"
+    if [ -z "$search" ]; then
+        echo -e "${RED}Error: Project ID required${NC}"
+        return 1
+    fi
+    
+    local file=$(find "$ACTIVE_DIR" -name "*${search}*.md" | head -1)
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    # Show project context
+    status_project "$search"
+    
+    echo ""
+    echo -e "${GREEN}📂 Context Files:${NC}"
+    grep -A20 "^context_files:" "$file" | grep "^  -" | sed 's/^  - /  /'
+    
+    # Update last accessed
+    sed -i '' "s/^updated:.*/updated: $(date +%Y-%m-%d)/" "$file"
+    
+    # Increment session count
+    local sessions=$(grep "session_count:" "$file" | cut -d' ' -f2)
+    ((sessions++))
+    sed -i '' "s/session_count:.*/session_count: $sessions/" "$file"
+    
+    # Add session start to progress log
+    echo "" >> "$file"
+    echo "### $(date '+%Y-%m-%d %H:%M') (Session $sessions)" >> "$file"
+    echo "#### In Progress" >> "$file"
+    echo "- Starting work session..." >> "$file"
+    
+    # Commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "Continue project: $(basename "$file")" >/dev/null 2>&1
+    
+    echo ""
+    echo -e "${GREEN}✅ Project loaded for continuation${NC}"
+}
+
+# Update progress (checkpoint)
+checkpoint() {
+    cd "$PROJECTS_DIR"
+    git add -A
+    git commit -m "Checkpoint: $(date +'%Y-%m-%d %H:%M:%S')" >/dev/null 2>&1
+    
+    # Push if remote exists
+    if git remote | grep -q origin; then
+        git push origin main >/dev/null 2>&1 &
+    fi
+    
+    echo -e "${GREEN}✅ Progress checkpoint saved${NC}"
+    
+    # Auto-sync active projects with GitHub issues
+    for file in "$ACTIVE_DIR"/*.md; do
+        if [ -f "$file" ]; then
+            local github_issue=$(grep "github_issue:" "$file" | cut -d' ' -f2)
+            if [ "$github_issue" != "null" ] && [ -n "$github_issue" ]; then
+                local project_id=$(basename "$file" | cut -d'-' -f2)
+                echo -e "${BLUE}Syncing project $project_id with GitHub issue #$github_issue...${NC}"
+                sync_project "$project_id" >/dev/null 2>&1
+            fi
+        fi
+    done
+}
+
+# Archive a project
+archive_project() {
+    local search="$1"
+    if [ -z "$search" ]; then
+        echo -e "${RED}Error: Project ID required${NC}"
+        return 1
+    fi
+    
+    local file=$(find "$ACTIVE_DIR" -name "*${search}*.md" | head -1)
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    # Update status
+    sed -i '' "s/^status:.*/status: archived/" "$file"
+    sed -i '' "s/^updated:.*/updated: $(date +%Y-%m-%d)/" "$file"
+    
+    # Move to archived
+    mv "$file" "$ARCHIVED_DIR/"
+    
+    # Update index
+    local id=$(grep "^id:" "$ARCHIVED_DIR/$(basename "$file")" | cut -d' ' -f2)
+    sed -i '' "s|active/$id|archived/$id|" "$PROJECTS_DIR/index.yaml"
+    
+    # Commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "Archived project: $id" >/dev/null 2>&1
+    
+    echo -e "${GREEN}✅ Project archived: $id${NC}"
+}
+
+# Update project index
+update_index() {
+    local id="$1"
+    local name="$2"
+    local status="$3"
+    local file="$4"
+    
+    # For now, just append to the file
+    # In a real implementation, we'd parse and update the YAML properly
+    echo "Project $id added to index" >/dev/null
+}
+
+# Delete project (move to trash)
+delete_project() {
+    local search="$1"
+    if [ -z "$search" ]; then
+        echo -e "${RED}Error: Project ID required${NC}"
+        echo "Usage: claude-project delete <id>"
+        return 1
+    fi
+    
+    # Find project in any directory
+    local file=$(find "$ACTIVE_DIR" "$ARCHIVED_DIR" "$IDEAS_DIR" -name "*${search}*.md" 2>/dev/null | head -1)
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Project not found${NC}"
+        return 1
+    fi
+    
+    local id=$(grep "^id:" "$file" | cut -d' ' -f2)
+    local name=$(grep "^name:" "$file" | cut -d'"' -f2)
+    
+    # Confirm deletion
+    echo -e "${YELLOW}Are you sure you want to delete project: $name ($id)?${NC}"
+    read -p "Type 'yes' to confirm: " confirm
+    
+    if [ "$confirm" != "yes" ]; then
+        echo "Deletion cancelled"
+        return 0
+    fi
+    
+    # Add deletion timestamp
+    echo -e "\n\n---\nDELETED: $(date +%Y-%m-%dT%H:%M:%S)\n---" >> "$file"
+    
+    # Move to trash
+    mv "$file" "$TRASH_DIR/"
+    
+    # Commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "Deleted project: $id - $name" >/dev/null 2>&1
+    
+    echo -e "${GREEN}✅ Project moved to trash: $id${NC}"
+    echo "To restore: claude-project restore $id"
+}
+
+# Create new idea
+new_idea() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error: Idea name required${NC}"
+        echo "Usage: claude-project idea <idea-name>"
+        return 1
+    fi
+    
+    local id="idea-$(date +%s)"
+    local filename="${id}-${name// /-}.md"
+    local filepath="$IDEAS_DIR/$filename"
+    
+    # Create idea file if template exists
+    if [ -f "$IDEA_TEMPLATE" ]; then
+        cp "$IDEA_TEMPLATE" "$filepath"
+    else
+        # Create basic idea file
+        cat > "$filepath" << EOF
+---
+id: $id
+name: "$name"
+status: idea
+priority: medium
+category: uncategorized
+effort: medium
+dependencies: []
+created: $(date +%Y-%m-%d)
+---
+
+# Idea: $name
+
+## Description
+[Describe what this project will accomplish]
+
+## Key Objectives
+- [ ] Primary objective
+- [ ] Secondary objective
+
+## Technical Requirements
+- Required skills/tools
+- Infrastructure needed
+
+## Notes
+[Any important considerations]
+EOF
+    fi
+    
+    # Update metadata
+    sed -i '' "s/idea-XXXX/$id/g" "$filepath"
+    sed -i '' "s/Idea Name/$name/g" "$filepath"
+    sed -i '' "s/YYYY-MM-DD/$(date +%Y-%m-%d)/g" "$filepath"
+    
+    # Commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "New idea: $name ($id)" >/dev/null 2>&1
+    
+    echo -e "${GREEN}✅ Created idea: $id - $name${NC}"
+    echo "📁 File: $filepath"
+}
+
+# List all ideas
+list_ideas() {
+    echo -e "${BLUE}📡 Project Ideas${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    local count=0
+    for file in "$IDEAS_DIR"/*.md; do
+        [ -f "$file" ] || continue
+        
+        local id=$(grep "^id:" "$file" | cut -d' ' -f2)
+        local name=$(grep "^name:" "$file" | cut -d'"' -f2)
+        local priority=$(grep "^priority:" "$file" | cut -d' ' -f2)
+        local category=$(grep "^category:" "$file" | cut -d' ' -f2)
+        local effort=$(grep "^effort:" "$file" | cut -d' ' -f2)
+        
+        # Color code by priority
+        case "$priority" in
+            high) echo -e "${RED}●${NC} [$id] $name" ;;
+            medium) echo -e "${YELLOW}●${NC} [$id] $name" ;;
+            low) echo -e "${GREEN}●${NC} [$id] $name" ;;
+            *) echo -e "○ [$id] $name" ;;
+        esac
+        echo "  Category: $category | Effort: $effort"
+        count=$((count + 1))
+    done
+    
+    if [ $count -eq 0 ]; then
+        echo "No ideas found. Create one with: claude-project idea \"My Idea\""
+    else
+        echo ""
+        echo "Total ideas: $count"
+    fi
+}
+
+# Promote idea to active project
+promote_idea() {
+    local search="$1"
+    if [ -z "$search" ]; then
+        echo -e "${RED}Error: Idea ID required${NC}"
+        echo "Usage: claude-project promote <idea-id>"
+        return 1
+    fi
+    
+    local file=$(find "$IDEAS_DIR" -name "*${search}*.md" | head -1)
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}Idea not found${NC}"
+        return 1
+    fi
+    
+    local old_id=$(grep "^id:" "$file" | cut -d' ' -f2)
+    local name=$(grep "^name:" "$file" | cut -d'"' -f2)
+    
+    # Generate new project ID
+    local new_id="proj-$(date +%s)"
+    local new_filename="${new_id}-${name// /-}.md"
+    local new_filepath="$ACTIVE_DIR/$new_filename"
+    
+    # Copy and transform to project
+    cp "$file" "$new_filepath"
+    
+    # Update metadata
+    sed -i '' "s/$old_id/$new_id/g" "$new_filepath"
+    sed -i '' "s/status: idea/status: active/g" "$new_filepath"
+    sed -i '' "s/^updated:.*/updated: $(date +%Y-%m-%d)/g" "$new_filepath"
+    
+    # Add tracking section if not present
+    if ! grep -q "tracking:" "$new_filepath"; then
+        sed -i '' "/^---$/a\\
+tracking:\\
+  auto_created: false\\
+  last_checkpoint: $(date +%Y-%m-%dT%H:%M:%S)\\
+  session_count: 0\\
+  total_time: \"0h 0m\"\\
+  files_modified: 0
+" "$new_filepath"
+    fi
+    
+    # Add project sections
+    echo -e "\n## Progress Log\n<!-- Claude will automatically add session entries here -->\n" >> "$new_filepath"
+    
+    # Remove old idea file
+    rm "$file"
+    
+    # Commit
+    cd "$PROJECTS_DIR" && git add . && git commit -m "Promoted idea to project: $name ($old_id → $new_id)" >/dev/null 2>&1
+    
+    echo -e "${GREEN}✅ Promoted to active project: $new_id${NC}"
+    echo "📁 File: $new_filepath"
+}
+
+# Show help
+show_help() {
+    echo "Claude Project Management CLI"
+    echo ""
+    echo "Usage: claude-project <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  new [--work|-w] <name>    Create a new project"
+    echo "  list                      List all active projects"
+    echo "  status [id]               Show project status (defaults to most recent)"
+    echo "  continue <id>             Continue working on a project"
+    echo "  checkpoint                Save progress checkpoint"
+    echo "  archive <id>              Archive a completed project"
+    echo "  delete <id>               Delete a project (move to trash)"
+    echo ""
+    echo "  link <github|linear> [id] [external-id]"
+    echo "                            Link project to GitHub issue or Linear ticket"
+    echo "  sync [id]                 Sync project with external systems"
+    echo "  install-hooks             Install git hooks for current repo"
+    echo ""
+    echo "  idea <name>     Create a new project idea"
+    echo "  ideas           List all project ideas"
+    echo "  promote <id>    Promote an idea to active project"
+    echo ""
+    echo "  help            Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  claude-project new \"Home Network Setup\""
+    echo "  claude-project list"
+    echo "  claude-project continue proj-123"
+    echo "  claude-project checkpoint"
+}
+
+# Main command handler
+case "$1" in
+    new) 
+        shift
+        new_project "$@" 
+        ;;
+    list) list_projects ;;
+    status) status_project "$2" ;;
+    continue) continue_project "$2" ;;
+    checkpoint) checkpoint ;;
+    archive) archive_project "$2" ;;
+    delete) delete_project "$2" ;;
+    link) 
+        shift
+        link_project "$@"
+        ;;
+    sync) sync_project "$2" ;;
+    install-hooks) install_hooks ;;
+    idea) new_idea "$2" ;;
+    ideas) list_ideas ;;
+    promote) promote_idea "$2" ;;
+    help|--help|-h) show_help ;;
+    *) 
+        echo -e "${RED}Unknown command: $1${NC}"
+        show_help
+        exit 1
+        ;;
+esac

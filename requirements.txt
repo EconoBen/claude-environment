@@ -1,0 +1,15 @@
+# Claude Environment Python Dependencies
+
+# Core dependencies
+anthropic>=0.8.0      # For context analysis using Claude API
+pyyaml>=6.0          # For YAML configuration parsing
+python-dotenv>=1.0.0  # Environment variable management
+click>=8.0           # CLI framework (if expanding to Python tools)
+rich>=13.0           # Rich terminal output
+gitpython>=3.1       # Git operations
+requests>=2.25.0     # HTTP requests for webhooks
+
+# Optional dependencies for enhanced functionality
+# jinja2>=3.0         # Template rendering
+# watchdog>=2.0       # File system monitoring
+# pytest>=7.0         # For testing hooks
