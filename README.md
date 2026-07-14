@@ -88,12 +88,12 @@ claude-project new "My First Project"
 
 ## Contributing
 
-This project is currently private. Once public, contributions will be welcome!
+Contributions and feedback are welcome.
 
 ## License
 
-MIT License (pending)
+MIT License
 
 ## Author
 
-Ben Labaschin (@EconoBen)
+Built by [Ben Labaschin](https://econoben.dev) (@EconoBen)
